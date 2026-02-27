@@ -24,6 +24,7 @@ This directory contains documentation for INDI device interfaces. All of these a
 - [Rotator Interface](indirotatorinterface.md) - Documentation for implementing the rotator interface
 - [Dust Cap Interface](indidustcapinterface.md) - Documentation for implementing the dust cap interface
 - [Dome Interface](indidomeinterface.md) - Documentation for implementing the dome interface
+- [PAC Interface](pac-interface.md) - Documentation for implementing the Polar Alignment Correction interface
 
 ## Other Core Interfaces
 
