@@ -12,13 +12,13 @@ This guide provides a comprehensive overview of implementing the Polar Alignment
 
 The PAC (Polar Alignment Correction) interface in INDI is designed for devices that provide automated polar alignment correction for equatorial mounts. Polar alignment is critical for astrophotography and long-exposure imaging, as misalignment causes star trailing and tracking errors.
 
+The interface exposes a **manual step control** (`PAC_MANUAL_ADJUSTMENT`) that a client (e.g. Ekos Polar Alignment Assistant) uses to nudge the mount's polar axis by a signed number of degrees on either the azimuth or altitude axis.
+
 The PAC interface can be implemented in two ways:
 
-1. **Standalone Device**: A dedicated polar alignment correction device (e.g., [Avalon Universal Polar Alignment System](https://www.avalon-instruments.com/products-menu/upas/universal-polar-alignment-system-detail) that mechanically adjusts the mount's polar axis.
+1. **Standalone Device**: A dedicated polar alignment correction device (e.g., [Avalon Universal Polar Alignment System](https://www.avalon-instruments.com/products-menu/upas/universal-polar-alignment-system-detail)) that mechanically adjusts the mount's polar axis.
 
 2. **Integrated into a Mount Driver**: The PAC interface can be embedded directly into a telescope mount driver, allowing the mount to perform its own polar alignment corrections.
-
-The PAC interface works by accepting azimuth and altitude error values (typically from a polar alignment assistant tool like KStars PAA) and applying the necessary mechanical corrections to bring the mount's polar axis into alignment with the celestial pole.
 
 ## Key Concepts for PAC Driver Development
 
@@ -26,260 +26,267 @@ Creating an INDI PAC driver involves four essential aspects:
 
 ### 1. Understand the Sign Convention
 
-The PAC interface uses a specific sign convention for errors and corrections:
+The PAC interface uses a specific sign convention for axis movements:
 
-**Error Values:**
-- **Positive azimuth error**: Polar axis is displaced to the East
-- **Negative azimuth error**: Polar axis is displaced to the West
-- **Positive altitude error**: Polar axis is too high (above the celestial pole)
-- **Negative altitude error**: Polar axis is too low (below the celestial pole)
+| Axis | Positive direction | Negative direction |
+|------|-------------------|--------------------|
+| Azimuth (`MANUAL_AZ_STEP`) | East | West |
+| Altitude (`MANUAL_ALT_STEP`) | North (increase altitude) | South (decrease altitude) |
 
-**Correction Movements:**
-- **Azimuth (MoveAZ)**: Positive value moves East, negative value moves West
-- **Altitude (MoveALT)**: Positive value moves North (increases altitude), negative value moves South (decreases altitude)
+### 2. Set the Capability Flags
 
-The relationship between errors and corrections is inverted:
-- A positive azimuth error (East) requires a negative correction (West): `MoveAZ(-azError)`
-- A positive altitude error (too high) requires a negative correction (South): `MoveALT(-altError)`
+In your driver's constructor call `SetCapability()` with the appropriate bitmask to enable optional features:
 
-### 2. Implement Virtual Functions
-
-The `INDI::PACInterface` base class defines virtual methods that you must implement:
-
-- **`StartCorrection(double azError, double altError)`**: Start automated correction using the provided error values
-- **`AbortCorrection()`**: Abort any ongoing correction
-- **`MoveAZ(double degrees)`**: Move the azimuth axis by the specified degrees
-- **`MoveALT(double degrees)`**: Move the altitude axis by the specified degrees
-
-### 3. Handle Property Processing
-
-Your driver must forward property changes to the PAC interface:
-
-- Call `PACInterface::processSwitch()` from your `ISNewSwitch()` method
-- Call `PACInterface::processNumber()` from your `ISNewNumber()` method
-
-### 4. Report Progress via Status Property
-
-During correction operations, update the `CorrectionStatusLP` property to reflect the current state:
-- **IPS_IDLE**: No correction in progress
-- **IPS_BUSY**: Correction in progress
-- **IPS_OK**: Correction completed successfully
-- **IPS_ALERT**: Correction failed
-
-## Prerequisites
-
-Before implementing the PAC interface, you should have:
-
-- Basic knowledge of C++ programming
-- Understanding of the INDI protocol and architecture
-- Familiarity with polar alignment concepts and procedures
-- Development environment set up (compiler, build tools, etc.)
-- INDI library installed
-
-## PAC Interface Structure
-
-The PAC interface consists of several key components:
-
-### Base Class
-
-`INDI::PACInterface` is a mixin class that can be combined with `INDI::DefaultDevice` (for standalone devices) or `INDI::Telescope` (for mount-integrated implementations) through multiple inheritance.
-
-### Standard Properties
-
-The PAC interface defines four standard properties:
-
-| Property | Type | Description |
-|----------|------|-------------|
-| **ALIGNMENT_CORRECTION_ERROR** | Number | Azimuth and altitude error values in degrees |
-| **ALIGNMENT_CORRECTION** | Switch | Start and Abort correction commands |
-| **ALIGNMENT_CORRECTION_STATUS** | Light | Current status of the correction operation |
-| **PAC_MANUAL_ADJUSTMENT** | Number | Manual azimuth and altitude step adjustments |
-
-#### ALIGNMENT_CORRECTION_ERROR
-
-This number property contains two elements:
-
-- **AZ_ERROR**: Azimuth error in degrees (-10 to +10)
-- **ALT_ERROR**: Altitude error in degrees (-10 to +10)
-
-Clients (like KStars Polar Alignment Assistant) set these values based on their measurements.
-
-#### ALIGNMENT_CORRECTION
-
-This switch property contains two elements:
-
-- **CORRECT**: Start the automated correction
-- **ABORT**: Abort any ongoing correction
-
-#### ALIGNMENT_CORRECTION_STATUS
-
-This light property provides visual feedback on the correction status:
-
-- **STATUS**: Shows IPS_BUSY during correction, IPS_OK when complete, IPS_ALERT on error
-
-#### PAC_MANUAL_ADJUSTMENT
-
-This number property allows manual fine-tuning:
-
-- **MANUAL_AZ_STEP**: Azimuth step in degrees (+East/-West)
-- **MANUAL_ALT_STEP**: Altitude step in degrees (+North/-South)
-
-### Virtual Methods
-
-The PAC interface defines four virtual methods:
-
-#### StartCorrection
+| Flag | Description |
+|------|-------------|
+| `PAC_HAS_SPEED` | Device supports variable motor speed (`PAC_SPEED` property) |
+| `PAC_CAN_REVERSE` | Device supports reversing each axis direction (`PAC_AZ_REVERSE` / `PAC_ALT_REVERSE` properties) |
+| `PAC_HAS_POSITION` | Device can report its current axis position (`PAC_POSITION` property) |
 
 ```cpp
-virtual IPState StartCorrection(double azError, double altError);
+PACSimulator::PACSimulator() : PACInterface(this)
+{
+    setVersion(1, 0);
+    SetCapability(PAC_HAS_SPEED | PAC_CAN_REVERSE);
+}
 ```
 
-Called when the client requests an automated correction. The default implementation calls `MoveAZ(-azError)` and `MoveALT(-altError)`. Override this method if your hardware supports a combined correction command.
+### 3. Implement the Virtual Methods
 
-**Returns:**
-- `IPS_OK`: Correction completed immediately
-- `IPS_BUSY`: Correction in progress (update `CorrectionStatusLP` when done)
-- `IPS_ALERT`: Error occurred
+The `INDI::PACInterface` base class defines virtual methods that you override to drive your hardware:
 
-#### AbortCorrection
+| Method | Required | Description |
+|--------|----------|-------------|
+| `MoveAZ(double degrees)` | **Yes** | Move the azimuth axis (+East, −West) |
+| `MoveALT(double degrees)` | **Yes** | Move the altitude axis (+North, −South) |
+| `AbortMotion()` | **Yes** | Abort all in-progress axis motion |
+| `SetPACSpeed(uint16_t speed)` | When `PAC_HAS_SPEED` | Set motor speed |
+| `ReverseAZ(bool enabled)` | When `PAC_CAN_REVERSE` | Reverse azimuth axis direction |
+| `ReverseALT(bool enabled)` | When `PAC_CAN_REVERSE` | Reverse altitude axis direction |
 
+### 4. Forward Property Processing
+
+Your driver must forward property changes to the PAC interface and also save its config:
+
+- Call `PACI::initProperties(group)` from `initProperties()`
+- Call `PACI::updateProperties()` from `updateProperties()`
+- Call `PACI::processSwitch()` from `ISNewSwitch()`
+- Call `PACI::processNumber()` from `ISNewNumber()`
+- Call `PACI::saveConfigItems(fp)` from `saveConfigItems()`
+
+Note: `PACI` is a convenience alias for `INDI::PACInterface` defined in the header:
 ```cpp
-virtual IPState AbortCorrection();
+using PACI = INDI::PACInterface;
 ```
 
-Called when the client requests to abort a correction. Must be implemented by the driver.
+## PAC Interface Properties
 
-**Returns:**
-- `IPS_OK`: Successfully aborted
-- `IPS_ALERT`: Error occurred
+### Always-present properties
 
-#### MoveAZ
+| Property name | Type | Permission | Description |
+|---------------|------|------------|-------------|
+| `PAC_MANUAL_ADJUSTMENT` | Number | Write-only | Signed azimuth and altitude step in degrees |
+| `PAC_ABORT_MOTION` | Switch | Read/Write | Pressing Abort calls `AbortMotion()` |
+
+#### PAC_MANUAL_ADJUSTMENT elements
+
+| Element | Description |
+|---------|-------------|
+| `MANUAL_AZ_STEP` | Azimuth step in degrees (+East / −West). Writing a non-zero value immediately triggers `MoveAZ()`. |
+| `MANUAL_ALT_STEP` | Altitude step in degrees (+North / −South). Writing a non-zero value immediately triggers `MoveALT()`. |
+
+The property state reflects the overall motion status:
+- `IPS_BUSY` — one or both axes still moving
+- `IPS_ALERT` — one or both axes encountered an error
+- `IPS_OK` — both axes completed successfully (or no movement was requested)
+
+### Optional capability-gated properties
+
+| Property name | Capability flag | Type | Description |
+|---------------|----------------|------|-------------|
+| `PAC_POSITION` | `PAC_HAS_POSITION` | Number (read-only) | Current azimuth and altitude offset in degrees |
+| `PAC_SPEED` | `PAC_HAS_SPEED` | Number | Motor speed (default range 1–10) |
+| `PAC_AZ_REVERSE` | `PAC_CAN_REVERSE` | Switch | Reverse azimuth axis direction |
+| `PAC_ALT_REVERSE` | `PAC_CAN_REVERSE` | Switch | Reverse altitude axis direction |
+
+#### PAC_POSITION elements (PAC_HAS_POSITION)
+
+| Element | Description |
+|---------|-------------|
+| `POSITION_AZ` | Current azimuth position in degrees (−360 to +360) |
+| `POSITION_ALT` | Current altitude position in degrees (−90 to +90) |
+
+Drivers should update this property periodically (e.g. from `TimerHit()`).
+
+## Virtual Methods Reference
+
+### MoveAZ
 
 ```cpp
 virtual IPState MoveAZ(double degrees);
 ```
 
-Move the azimuth axis. Positive values move East, negative values move West.
+Move the azimuth axis by the given number of degrees. Positive = East, negative = West.
+
+The default implementation returns `IPS_ALERT`. Drivers must override this.
 
 **Returns:**
-- `IPS_OK`: Movement completed immediately
-- `IPS_BUSY`: Movement in progress
-- `IPS_ALERT`: Error occurred (default implementation)
+- `IPS_OK` — movement completed immediately
+- `IPS_BUSY` — movement in progress (update `ManualAdjustmentNP` state when done)
+- `IPS_ALERT` — error occurred
 
-#### MoveALT
+### MoveALT
 
 ```cpp
 virtual IPState MoveALT(double degrees);
 ```
 
-Move the altitude axis. Positive values move North (increase altitude), negative values move South (decrease altitude).
+Move the altitude axis by the given number of degrees. Positive = North (increase altitude), negative = South.
+
+The default implementation returns `IPS_ALERT`. Drivers must override this.
 
 **Returns:**
-- `IPS_OK`: Movement completed immediately
-- `IPS_BUSY`: Movement in progress
-- `IPS_ALERT`: Error occurred (default implementation)
+- `IPS_OK` — movement completed immediately
+- `IPS_BUSY` — movement in progress (update `ManualAdjustmentNP` state when done)
+- `IPS_ALERT` — error occurred
+
+### AbortMotion
+
+```cpp
+virtual bool AbortMotion();
+```
+
+Abort all in-progress axis motion immediately. The default implementation logs an error and returns `false`. Drivers that support hardware abort must override this.
+
+**Returns:** `true` if successfully aborted, `false` otherwise.
+
+### SetPACSpeed
+
+```cpp
+virtual bool SetPACSpeed(uint16_t speed);
+```
+
+Set the motor speed. Only called when `PAC_HAS_SPEED` capability is set. The default implementation logs an error and returns `false`. Drivers with variable-speed hardware must override.
+
+Speed range is defined by the driver. The default range is 1–10; drivers can adjust `SpeedNP[0]` min/max/step in `initProperties()` after calling `PACI::initProperties()`.
+
+**Returns:** `true` if the speed was applied successfully, `false` otherwise.
+
+### ReverseAZ
+
+```cpp
+virtual bool ReverseAZ(bool enabled);
+```
+
+Reverse (or restore) the azimuth axis movement direction. Only called when `PAC_CAN_REVERSE` is set.
+
+**Returns:** `true` if successful, `false` otherwise.
+
+### ReverseALT
+
+```cpp
+virtual bool ReverseALT(bool enabled);
+```
+
+Reverse (or restore) the altitude axis movement direction. Only called when `PAC_CAN_REVERSE` is set.
+
+**Returns:** `true` if successful, `false` otherwise.
 
 ## Implementing a Standalone PAC Driver
 
-Let's create a standalone PAC driver for a hypothetical polar alignment correction device called "MyPAC". This device has motors for both azimuth and altitude adjustment and communicates via serial/USB.
+The following example is based on the reference `PACSimulator` driver included with the INDI library.
 
 ### Step 1: Create the Header File
 
-Create a file named `mypacdriver.h` with the following content:
-
 ```cpp
+// mypacdriver.h
 #pragma once
 
-#include <defaultdevice.h>
-#include <indipacinterface.h>
+#include "defaultdevice.h"
+#include "indipacinterface.h"
 
 class MyPACDriver : public INDI::DefaultDevice, public INDI::PACInterface
 {
-public:
-    MyPACDriver();
-    virtual ~MyPACDriver() = default;
+    public:
+        MyPACDriver();
+        virtual ~MyPACDriver() override = default;
 
-    // DefaultDevice overrides
-    virtual const char *getDefaultName() override;
-    virtual bool initProperties() override;
-    virtual bool updateProperties() override;
-    virtual bool ISNewNumber(const char *dev, const char *name, double values[], char *names[], int n) override;
-    virtual bool ISNewSwitch(const char *dev, const char *name, ISState *states, char *names[], int n) override;
+        bool ISNewNumber(const char *dev, const char *name, double values[], char *names[], int n) override;
+        bool ISNewSwitch(const char *dev, const char *name, ISState *states, char *names[], int n) override;
 
-    // PACInterface overrides
-    virtual IPState StartCorrection(double azError, double altError) override;
-    virtual IPState AbortCorrection() override;
-    virtual IPState MoveAZ(double degrees) override;
-    virtual IPState MoveALT(double degrees) override;
+    protected:
+        bool initProperties() override;
+        bool updateProperties() override;
+        bool saveConfigItems(FILE *fp) override;
 
-protected:
-    // Connection overrides
-    virtual bool Connect() override;
-    virtual bool Disconnect() override;
+        bool Connect() override;
+        bool Disconnect() override;
 
-    // Periodic updates
-    virtual void TimerHit() override;
+        const char *getDefaultName() override
+        {
+            return "My PAC";
+        }
 
-    // Helpers
-    bool sendCommand(const char *cmd, char *res = nullptr, int reslen = 0);
-    bool isMoving();
+        // PACInterface – single-axis movement
+        // MoveAZ:  positive = East,  negative = West
+        // MoveALT: positive = North, negative = South
+        IPState MoveAZ(double degrees) override;
+        IPState MoveALT(double degrees) override;
 
-private:
-    // Device handle
-    int PortFD = -1;
+        // PACInterface – abort, speed, and reverse
+        bool AbortMotion() override;
+        bool SetPACSpeed(uint16_t speed) override;   // only needed with PAC_HAS_SPEED
+        bool ReverseAZ(bool enabled) override;       // only needed with PAC_CAN_REVERSE
+        bool ReverseALT(bool enabled) override;      // only needed with PAC_CAN_REVERSE
 
-    // Movement state
-    bool AzMoving = false;
-    bool AltMoving = false;
-
-    // Custom properties
-    INDI::PropertyNumber MovementSpeedNP {1};
+    private:
+        // Track how many axes are still moving.
+        int m_MovingAxes {0};
 };
 ```
 
 ### Step 2: Create the Implementation File
 
-Create a file named `mypacdriver.cpp` with the following content:
-
 ```cpp
+// mypacdriver.cpp
 #include "mypacdriver.h"
 
 #include <memory>
-#include <string.h>
-#include <unistd.h>
-#include <connectionplugins/connectionserial.h>
 
-// We declare an auto pointer to MyPACDriver
 static std::unique_ptr<MyPACDriver> mypac(new MyPACDriver());
 
-MyPACDriver::MyPACDriver()
-    : PACInterface(this)
+// ---------------------------------------------------------------------------
+// Constructor / setup
+// ---------------------------------------------------------------------------
+
+MyPACDriver::MyPACDriver() : PACInterface(this)
 {
     setVersion(1, 0);
 
-    // Set the driver interface to PAC_INTERFACE
-    setDriverInterface(PAC_INTERFACE);
+    // Declare the capabilities your hardware supports.
+    SetCapability(PAC_HAS_SPEED | PAC_CAN_REVERSE);
+
+    // Include PAC_INTERFACE so clients (e.g. Ekos) discover this driver correctly.
+    setDriverInterface(AUX_INTERFACE | PAC_INTERFACE);
 }
 
-const char *MyPACDriver::getDefaultName()
-{
-    return "My PAC";
-}
+// ---------------------------------------------------------------------------
+// Properties
+// ---------------------------------------------------------------------------
 
 bool MyPACDriver::initProperties()
 {
-    // Initialize the parent's properties
     INDI::DefaultDevice::initProperties();
 
-    // Initialize PAC interface properties
-    PACInterface::initProperties(MAIN_CONTROL_TAB);
+    // Initialise PAC interface properties.
+    PACI::initProperties(MAIN_CONTROL_TAB);
 
-    // Add custom properties
-    MovementSpeedNP[0].fill("SPEED", "Speed (deg/s)", "%.2f", 0.1, 5.0, 0.1, 1.0);
-    MovementSpeedNP.fill(getDeviceName(), "MOVEMENT_SPEED", "Movement Speed",
-                         MAIN_CONTROL_TAB, IP_RW, 0, IPS_IDLE);
+    // Optionally adjust the speed range after PACI::initProperties():
+    SpeedNP[0].setMin(1);
+    SpeedNP[0].setMax(5);
+    SpeedNP[0].setStep(1);
+    SpeedNP[0].setValue(1);
 
-    // Add debug, simulation, and configuration controls
     addAuxControls();
 
     return true;
@@ -287,283 +294,157 @@ bool MyPACDriver::initProperties()
 
 bool MyPACDriver::updateProperties()
 {
-    // Call the parent's updateProperties
     INDI::DefaultDevice::updateProperties();
 
-    // Call PAC interface updateProperties
-    PACInterface::updateProperties();
-
-    if (isConnected())
-    {
-        defineProperty(MovementSpeedNP);
-    }
-    else
-    {
-        deleteProperty(MovementSpeedNP);
-    }
+    // PACI::updateProperties() defines / deletes PAC properties based on
+    // connection state and the capability flags set in the constructor.
+    PACI::updateProperties();
 
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Property handlers
+// ---------------------------------------------------------------------------
+
 bool MyPACDriver::ISNewNumber(const char *dev, const char *name, double values[], char *names[], int n)
 {
-    // Check if the message is for this device
     if (dev != nullptr && strcmp(dev, getDeviceName()) == 0)
     {
-        // Handle custom properties
-        if (MovementSpeedNP.isNameMatch(name))
-        {
-            MovementSpeedNP.update(values, names, n);
-            MovementSpeedNP.setState(IPS_OK);
-            MovementSpeedNP.apply();
-            return true;
-        }
-
-        // Let PAC interface handle its properties
-        if (PACInterface::processNumber(dev, name, values, names, n))
+        if (PACI::processNumber(dev, name, values, names, n))
             return true;
     }
-
     return INDI::DefaultDevice::ISNewNumber(dev, name, values, names, n);
 }
 
 bool MyPACDriver::ISNewSwitch(const char *dev, const char *name, ISState *states, char *names[], int n)
 {
-    // Check if the message is for this device
     if (dev != nullptr && strcmp(dev, getDeviceName()) == 0)
     {
-        // Let PAC interface handle its properties
-        if (PACInterface::processSwitch(dev, name, states, names, n))
+        if (PACI::processSwitch(dev, name, states, names, n))
             return true;
     }
-
     return INDI::DefaultDevice::ISNewSwitch(dev, name, states, names, n);
 }
 
+bool MyPACDriver::saveConfigItems(FILE *fp)
+{
+    INDI::DefaultDevice::saveConfigItems(fp);
+    // Saves SpeedNP, AZReverseSP, and ALTReverseSP (as enabled by capabilities).
+    PACI::saveConfigItems(fp);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Connection
+// ---------------------------------------------------------------------------
+
 bool MyPACDriver::Connect()
 {
-    bool result = INDI::DefaultDevice::Connect();
-
-    if (result)
-    {
-        // Get the file descriptor for the serial port
-        PortFD = serialConnection->getPortFD();
-
-        // Send a test command to verify the connection
-        if (!sendCommand("PING\r\n"))
-        {
-            LOG_ERROR("Failed to communicate with the PAC device");
-            return false;
-        }
-
-        // Start the timer for periodic updates
-        SetTimer(POLLMS);
-
-        LOG_INFO("PAC device connected successfully");
-    }
-
-    return result;
+    LOG_INFO("MyPAC connected.");
+    return true;
 }
 
 bool MyPACDriver::Disconnect()
 {
-    // Close the serial port
-    if (PortFD > 0)
-    {
-        close(PortFD);
-        PortFD = -1;
-    }
-
-    return INDI::DefaultDevice::Disconnect();
+    LOG_INFO("MyPAC disconnected.");
+    return true;
 }
 
-void MyPACDriver::TimerHit()
+// ---------------------------------------------------------------------------
+// Abort
+// ---------------------------------------------------------------------------
+
+bool MyPACDriver::AbortMotion()
 {
-    if (!isConnected())
-        return;
-
-    // Check if movement is complete
-    if (AzMoving || AltMoving)
-    {
-        if (!isMoving())
-        {
-            AzMoving = false;
-            AltMoving = false;
-
-            // Update status
-            ManualAdjustmentNP.setState(IPS_OK);
-            ManualAdjustmentNP.apply();
-
-            // If this was part of an automated correction, check if complete
-            if (CorrectionSP.getState() == IPS_BUSY)
-            {
-                CorrectionSP.setState(IPS_OK);
-                CorrectionSP.reset();
-                CorrectionSP.apply();
-                CorrectionStatusLP[0].setState(IPS_OK);
-                CorrectionStatusLP.apply();
-                LOG_INFO("Alignment correction completed successfully.");
-            }
-        }
-    }
-
-    SetTimer(POLLMS);
+    // TODO: send hardware abort command
+    LOG_INFO("Alignment correction motion aborted.");
+    m_MovingAxes = 0;
+    return true;
 }
 
-IPState MyPACDriver::StartCorrection(double azError, double altError)
+// ---------------------------------------------------------------------------
+// Speed and reverse (PAC_HAS_SPEED / PAC_CAN_REVERSE)
+// ---------------------------------------------------------------------------
+
+bool MyPACDriver::SetPACSpeed(uint16_t speed)
 {
-    if (CorrectionSP.getState() == IPS_BUSY)
-    {
-        LOG_WARN("Alignment correction is already in progress.");
-        return IPS_BUSY;
-    }
-
-    LOGF_INFO("Starting alignment correction: AZ=%.4f deg, ALT=%.4f deg", azError, altError);
-
-    // Apply corrections (inverted from error)
-    const IPState azState = MoveAZ(-azError);
-    const IPState altState = MoveALT(-altError);
-
-    if (azState == IPS_ALERT || altState == IPS_ALERT)
-        return IPS_ALERT;
-    if (azState == IPS_BUSY || altState == IPS_BUSY)
-        return IPS_BUSY;
-    return IPS_OK;
+    // TODO: send speed command to hardware
+    LOGF_INFO("Speed set to %u.", speed);
+    return true;
 }
 
-IPState MyPACDriver::AbortCorrection()
+bool MyPACDriver::ReverseAZ(bool enabled)
 {
-    // Send abort command to the device
-    if (!sendCommand("ABORT\r\n"))
-    {
-        LOG_ERROR("Failed to abort correction");
-        return IPS_ALERT;
-    }
-
-    AzMoving = false;
-    AltMoving = false;
-
-    LOG_INFO("Alignment correction aborted.");
-    return IPS_OK;
+    // TODO: send reverse command to hardware
+    LOGF_INFO("Azimuth direction reverse %s.", enabled ? "enabled" : "disabled");
+    return true;
 }
+
+bool MyPACDriver::ReverseALT(bool enabled)
+{
+    // TODO: send reverse command to hardware
+    LOGF_INFO("Altitude direction reverse %s.", enabled ? "enabled" : "disabled");
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Single-axis movement
+// ---------------------------------------------------------------------------
 
 IPState MyPACDriver::MoveAZ(double degrees)
 {
-    const char *direction = (degrees >= 0) ? "EAST" : "WEST";
+    const char *direction = (degrees >= 0) ? "East" : "West";
+    LOGF_INFO("Moving azimuth: %.4f deg %s.", std::abs(degrees), direction);
 
-    LOGF_INFO("Moving azimuth: %.4f deg %s", std::abs(degrees), direction);
+    // TODO: send move command to hardware and start async tracking.
+    m_MovingAxes++;
 
-    // Send move command
-    char cmd[32];
-    snprintf(cmd, sizeof(cmd), "MOVE_AZ %s %.4f\r\n", direction, std::abs(degrees));
+    // When the move completes (e.g. in a timer callback or hardware interrupt):
+    //   m_MovingAxes--;
+    //   if (m_MovingAxes <= 0) {
+    //       m_MovingAxes = 0;
+    //       ManualAdjustmentNP.setState(IPS_OK);
+    //       ManualAdjustmentNP.apply();
+    //   }
 
-    if (!sendCommand(cmd))
-    {
-        LOG_ERROR("Failed to move azimuth axis");
-        return IPS_ALERT;
-    }
-
-    AzMoving = true;
     return IPS_BUSY;
 }
 
 IPState MyPACDriver::MoveALT(double degrees)
 {
-    const char *direction = (degrees >= 0) ? "NORTH" : "SOUTH";
+    const char *direction = (degrees >= 0) ? "North" : "South";
+    LOGF_INFO("Moving altitude: %.4f deg %s.", std::abs(degrees), direction);
 
-    LOGF_INFO("Moving altitude: %.4f deg %s", std::abs(degrees), direction);
+    // TODO: send move command to hardware and start async tracking.
+    m_MovingAxes++;
 
-    // Send move command
-    char cmd[32];
-    snprintf(cmd, sizeof(cmd), "MOVE_ALT %s %.4f\r\n", direction, std::abs(degrees));
-
-    if (!sendCommand(cmd))
-    {
-        LOG_ERROR("Failed to move altitude axis");
-        return IPS_ALERT;
-    }
-
-    AltMoving = true;
     return IPS_BUSY;
-}
-
-bool MyPACDriver::sendCommand(const char *cmd, char *res, int reslen)
-{
-    if (PortFD < 0)
-    {
-        LOG_ERROR("Serial port not open");
-        return false;
-    }
-
-    // Write the command
-    int nbytes_written = write(PortFD, cmd, strlen(cmd));
-    if (nbytes_written < 0)
-    {
-        LOGF_ERROR("Error writing to PAC device: %s", strerror(errno));
-        return false;
-    }
-
-    // If no response is expected, return success
-    if (res == nullptr || reslen <= 0)
-        return true;
-
-    // Read the response
-    int nbytes_read = read(PortFD, res, reslen - 1);
-    if (nbytes_read < 0)
-    {
-        LOGF_ERROR("Error reading from PAC device: %s", strerror(errno));
-        return false;
-    }
-
-    res[nbytes_read] = '\0';
-    return true;
-}
-
-bool MyPACDriver::isMoving()
-{
-    char res[16];
-    if (!sendCommand("STATUS\r\n", res, sizeof(res)))
-        return false;
-
-    int moving = 0;
-    if (sscanf(res, "MOVING %d", &moving) != 1)
-        return false;
-
-    return moving != 0;
 }
 ```
 
-### Step 3: Create the CMakeLists.txt File
+### Step 3: Create the CMakeLists.txt Entry
+
+If you are adding the driver inside the INDI source tree under `drivers/auxiliary/`:
 
 ```cmake
-cmake_minimum_required(VERSION 3.0)
-project(indi-mypac CXX C)
-
-include(GNUInstallDirs)
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules/")
-
-find_package(INDI REQUIRED)
-
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-include_directories(${INDI_INCLUDE_DIR})
-
+# Inside drivers/auxiliary/CMakeLists.txt
 add_executable(indi_mypac mypacdriver.cpp)
-
-target_link_libraries(indi_mypac ${INDI_LIBRARIES})
-
+target_link_libraries(indi_mypac indibase)
 install(TARGETS indi_mypac RUNTIME DESTINATION bin)
 ```
 
-### Step 4: Create the XML File
+For an out-of-tree driver, use `find_package(INDI REQUIRED)` and link against `${INDI_LIBRARIES}`.
 
-Create a file named `indi_mypac.xml`:
+### Step 4: Create the XML Driver Description
+
+Create `indi_mypac.xml`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <driversList>
    <devGroup group="Auxiliary">
-      <device label="My PAC" manufacturer="INDI">
+      <device label="My PAC" manufacturer="YourCompany">
          <driver name="My PAC">indi_mypac</driver>
          <version>1.0</version>
       </device>
@@ -574,8 +455,7 @@ Create a file named `indi_mypac.xml`:
 ### Step 5: Build and Install
 
 ```bash
-mkdir build
-cd build
+mkdir build && cd build
 cmake ..
 make
 sudo make install
@@ -583,89 +463,128 @@ sudo make install
 
 ## Integrating PAC into a Mount Driver
 
-To add PAC capabilities to an existing telescope mount driver, use multiple inheritance:
+To add PAC capabilities to an existing telescope mount driver, use multiple inheritance and include `PAC_INTERFACE` in `setDriverInterface()`:
 
 ```cpp
-#include <inditelescope.h>
-#include <indipacinterface.h>
+#include "inditelescope.h"
+#include "indipacinterface.h"
 
 class MyMountWithPAC : public INDI::Telescope, public INDI::PACInterface
 {
-public:
-    MyMountWithPAC();
+    public:
+        MyMountWithPAC() : PACInterface(this)
+        {
+            // Include PAC_INTERFACE in addition to TELESCOPE_INTERFACE.
+            setDriverInterface(TELESCOPE_INTERFACE | PAC_INTERFACE);
+            SetCapability(PAC_HAS_SPEED | PAC_CAN_REVERSE);
+        }
 
-    // Override initProperties to include PAC properties
-    virtual bool initProperties() override;
-    virtual bool updateProperties() override;
+        bool initProperties() override
+        {
+            INDI::Telescope::initProperties();
+            PACI::initProperties(MAIN_CONTROL_TAB);
+            addAuxControls();
+            return true;
+        }
 
-    // Forward to PAC interface
-    virtual bool ISNewNumber(const char *dev, const char *name, double values[], char *names[], int n) override;
-    virtual bool ISNewSwitch(const char *dev, const char *name, ISState *states, char *names[], int n) override;
+        bool updateProperties() override
+        {
+            INDI::Telescope::updateProperties();
+            PACI::updateProperties();
+            return true;
+        }
 
-    // Implement PAC virtual methods
-    virtual IPState StartCorrection(double azError, double altError) override;
-    virtual IPState AbortCorrection() override;
-    virtual IPState MoveAZ(double degrees) override;
-    virtual IPState MoveALT(double degrees) override;
+        bool ISNewNumber(const char *dev, const char *name, double values[], char *names[], int n) override
+        {
+            if (dev != nullptr && strcmp(dev, getDeviceName()) == 0)
+            {
+                if (PACI::processNumber(dev, name, values, names, n))
+                    return true;
+            }
+            return INDI::Telescope::ISNewNumber(dev, name, values, names, n);
+        }
 
-protected:
-    // ... other telescope methods
+        bool ISNewSwitch(const char *dev, const char *name, ISState *states, char *names[], int n) override
+        {
+            if (dev != nullptr && strcmp(dev, getDeviceName()) == 0)
+            {
+                if (PACI::processSwitch(dev, name, states, names, n))
+                    return true;
+            }
+            return INDI::Telescope::ISNewSwitch(dev, name, states, names, n);
+        }
+
+        bool saveConfigItems(FILE *fp) override
+        {
+            INDI::Telescope::saveConfigItems(fp);
+            PACI::saveConfigItems(fp);
+            return true;
+        }
+
+    protected:
+        // Implement MoveAZ / MoveALT using the mount's existing adjustment motors.
+        IPState MoveAZ(double degrees) override;
+        IPState MoveALT(double degrees) override;
+        bool AbortMotion() override;
+        bool SetPACSpeed(uint16_t speed) override;
+        bool ReverseAZ(bool enabled) override;
+        bool ReverseALT(bool enabled) override;
 };
+```
 
-MyMountWithPAC::MyMountWithPAC()
-    : PACInterface(this)
-{
-    // Include PAC_INTERFACE in addition to TELESCOPE_INTERFACE
-    setDriverInterface(TELESCOPE_INTERFACE | PAC_INTERFACE);
-}
+## Asynchronous Movement and State Reporting
 
-bool MyMountWithPAC::initProperties()
-{
-    INDI::Telescope::initProperties();
-    PACInterface::initProperties(MAIN_CONTROL_TAB);
-    addAuxControls();
-    return true;
-}
+When `MoveAZ()` or `MoveALT()` returns `IPS_BUSY`, the driver is responsible for updating `ManualAdjustmentNP` once motion finishes. A typical pattern using `INDI::Timer::singleShot()`:
 
-bool MyMountWithPAC::updateProperties()
+```cpp
+IPState MyPACDriver::MoveAZ(double degrees)
 {
-    INDI::Telescope::updateProperties();
-    PACInterface::updateProperties();
-    return true;
-}
+    const double duration = /* compute from speed */ 2.0;
 
-bool MyMountWithPAC::ISNewNumber(const char *dev, const char *name, double values[], char *names[], int n)
-{
-    if (dev != nullptr && strcmp(dev, getDeviceName()) == 0)
+    m_MovingAxes++;
+
+    INDI::Timer::singleShot(static_cast<int>(duration * 1000), [this, degrees]()
     {
-        if (PACInterface::processNumber(dev, name, values, names, n))
-            return true;
-    }
-    return INDI::Telescope::ISNewNumber(dev, name, values, names, n);
-}
+        LOGF_INFO("Azimuth move complete: %.4f deg.", std::abs(degrees));
 
-bool MyMountWithPAC::ISNewSwitch(const char *dev, const char *name, ISState *states, char *names[], int n)
+        m_MovingAxes--;
+        if (m_MovingAxes <= 0)
+        {
+            m_MovingAxes = 0;
+            ManualAdjustmentNP.setState(IPS_OK);
+            ManualAdjustmentNP.apply();
+        }
+    });
+
+    return IPS_BUSY;
+}
+```
+
+When both axes complete, set `ManualAdjustmentNP` to `IPS_OK` and call `apply()` so that snooping drivers (e.g. the telescope simulator) can read the applied correction.
+
+## Reporting Position (PAC_HAS_POSITION)
+
+If your hardware can report its current axis offset, set `PAC_HAS_POSITION` in `SetCapability()`. The `PAC_POSITION` property will then be defined automatically when the device connects.
+
+Update the position values from your `TimerHit()` (or equivalent):
+
+```cpp
+void MyPACDriver::TimerHit()
 {
-    if (dev != nullptr && strcmp(dev, getDeviceName()) == 0)
+    if (!isConnected())
+        return;
+
+    // Query hardware for current position and update.
+    double azPos = 0, altPos = 0;
+    if (getHardwarePosition(azPos, altPos))
     {
-        if (PACInterface::processSwitch(dev, name, states, names, n))
-            return true;
+        PositionNP[POSITION_AZ].setValue(azPos);
+        PositionNP[POSITION_ALT].setValue(altPos);
+        PositionNP.setState(IPS_OK);
+        PositionNP.apply();
     }
-    return INDI::Telescope::ISNewSwitch(dev, name, states, names, n);
-}
 
-// Implement MoveAZ and MoveALT to use the mount's existing motors
-IPState MyMountWithPAC::MoveAZ(double degrees)
-{
-    // Use the mount's azimuth adjustment motor
-    // This depends on your mount's specific hardware
-    // ...
-}
-
-IPState MyMountWithPAC::MoveALT(double degrees)
-{
-    // Use the mount's altitude adjustment motor
-    // ...
+    SetTimer(POLLMS);
 }
 ```
 
@@ -673,17 +592,17 @@ IPState MyMountWithPAC::MoveALT(double degrees)
 
 When implementing the PAC interface, follow these best practices:
 
-- **Implement simulation mode** to allow testing without hardware. Check `isSimulation()` and provide simulated responses.
-- **Provide informative error messages** to help users troubleshoot issues.
-- **Handle abort gracefully** - ensure the device stops moving immediately when abort is requested.
-- **Update status promptly** - keep `CorrectionStatusLP` updated so clients can monitor progress.
-- **Use appropriate precision** for error values - typically 4 decimal places for degree values.
-- **Validate input ranges** - ensure error values are within reasonable limits before applying corrections.
-- **Document sign conventions** clearly in your driver's documentation.
-- **Consider safety limits** - prevent movements that could damage equipment or cause collisions.
+- **Implement simulation mode** — check `isSimulation()` and provide simulated motion with realistic durations so clients can be tested without hardware.
+- **Set capabilities in the constructor** — call `SetCapability()` before `initProperties()` runs.
+- **Adjust speed range after `PACI::initProperties()`** — the default range is 1–10; modify `SpeedNP[0]` min/max/step to match your hardware.
+- **Track moving axes** — maintain an axis counter so `ManualAdjustmentNP` is only set to `IPS_OK` after *both* requested axes have finished.
+- **Forward `saveConfigItems`** — call `PACI::saveConfigItems(fp)` to persist speed and reverse settings across sessions.
+- **Handle abort gracefully** — stop all hardware motion immediately and reset `m_MovingAxes` to 0.
+- **Use 4-decimal-place precision** — degree values from PAA tools are typically ±0.001°.
+- **Document sign conventions** in your driver's log messages and user manual.
 
 ## Conclusion
 
-Implementing the PAC interface in INDI drivers enables automated polar alignment correction, significantly improving the user experience for astrophotographers. Whether implementing a standalone correction device or integrating PAC capabilities into a mount driver, the interface provides a standardized way for clients to measure and correct polar alignment errors.
+The PAC interface provides a standardised way for clients (such as the KStars Polar Alignment Assistant) to apply mechanical polar-alignment corrections. Whether implementing a standalone correction device or adding PAC capability to an existing mount driver, the interface requires only six virtual methods and a small amount of property-forwarding boilerplate.
 
 For more information, refer to the [INDI Library Documentation](https://www.indilib.org/api/index.html) and the [INDI Driver Development Guide](https://www.indilib.org/develop/developer-manual/100-driver-development.html).
