@@ -67,6 +67,7 @@ The `INDI::PACInterface` base class defines virtual methods that you override to
 |--------|----------|-------------|
 | `MoveAZ(double degrees)` | **Yes** | Move the azimuth axis (+East, −West) |
 | `MoveALT(double degrees)` | **Yes** | Move the altitude axis (+North, −South) |
+| `MoveBoth(double azDegrees, double altDegrees)` | **Recommended** | Move both axes in a single coordinated operation (see [Coordinated Dual-Axis Movement](#coordinated-dual-axis-movement)) |
 | `AbortMotion()` | **Yes** | Abort all in-progress axis motion |
 | `SetPACSpeed(uint16_t speed)` | When `PAC_HAS_SPEED` | Set motor speed |
 | `ReverseAZ(bool enabled)` | When `PAC_CAN_REVERSE` | Reverse azimuth axis direction |
@@ -108,8 +109,10 @@ using PACI = INDI::PACInterface;
 
 | Element | Description |
 |---------|-------------|
-| `MANUAL_AZ_STEP` | Azimuth step in degrees (+East / −West). Writing a non-zero value immediately triggers `MoveAZ()`. |
-| `MANUAL_ALT_STEP` | Altitude step in degrees (+North / −South). Writing a non-zero value immediately triggers `MoveALT()`. |
+| `MANUAL_AZ_STEP` | Azimuth step in degrees (+East / −West). Writing a non-zero value triggers axis movement. |
+| `MANUAL_ALT_STEP` | Altitude step in degrees (+North / −South). Writing a non-zero value triggers axis movement. |
+
+When **both** elements are non-zero in the same write, `processNumber()` calls `MoveBoth(azStep, altStep)` instead of the individual methods. If only one element is non-zero, `MoveAZ()` or `MoveALT()` is called directly. See [Coordinated Dual-Axis Movement](#coordinated-dual-axis-movement) for details.
 
 The property state reflects the overall motion status:
 - `IPS_BUSY` — one or both axes still moving
@@ -193,6 +196,28 @@ The default implementation returns `IPS_ALERT`. Drivers must override this.
 
 **Returns:**
 - `IPS_OK` — movement completed immediately
+- `IPS_BUSY` — movement in progress (update `ManualAdjustmentNP` state when done)
+- `IPS_ALERT` — error occurred
+
+### MoveBoth
+
+```cpp
+virtual IPState MoveBoth(double azDegrees, double altDegrees);
+```
+
+Move both axes in a single coordinated operation. Called by `processNumber()` when **both** `MANUAL_AZ_STEP` and `MANUAL_ALT_STEP` are non-zero in the same write.
+
+The **default implementation** calls `MoveAZ(azDegrees)` followed by `MoveALT(altDegrees)` in sequence — fully backward-compatible for drivers that do not override it.
+
+Drivers should override `MoveBoth` when their hardware supports a native dual-axis command:
+
+| Hardware type | Recommended override |
+|---|---|
+| Native dual-axis command (e.g. GRBL `$J=G91G21X…Y… F…`) | Single command — both axes move simultaneously |
+| Shared angle registers with internal sequencing (e.g. MLAstro RPA `AAll:1`) | Single chained command — device sequences AZ→ALT internally |
+
+**Returns:**
+- `IPS_OK` — all movement completed immediately
 - `IPS_BUSY` — movement in progress (update `ManualAdjustmentNP` state when done)
 - `IPS_ALERT` — error occurred
 
@@ -356,9 +381,12 @@ class MyPACDriver : public INDI::DefaultDevice, public INDI::PACInterface
             return "My PAC";
         }
 
-        // PACInterface – single-axis movement
+        // PACInterface – single-axis movement (required)
         IPState MoveAZ(double degrees) override;
         IPState MoveALT(double degrees) override;
+
+        // PACInterface – coordinated dual-axis movement (recommended)
+        IPState MoveBoth(double azDegrees, double altDegrees) override;
 
         // PACInterface – abort, speed, and reverse
         bool AbortMotion() override;
@@ -610,6 +638,21 @@ IPState MyPACDriver::MoveALT(double degrees)
     m_MovingAxes++;
     return IPS_BUSY;
 }
+
+// ---------------------------------------------------------------------------
+// Coordinated dual-axis movement (recommended override)
+// ---------------------------------------------------------------------------
+
+IPState MyPACDriver::MoveBoth(double azDegrees, double altDegrees)
+{
+    // TODO: if the hardware has a single combined command, send it here.
+    // Otherwise the default base-class implementation (sequential MoveAZ +
+    // MoveALT) is used automatically and you can omit this override entirely.
+    LOGF_INFO("MoveBoth: AZ %.4f deg, ALT %.4f deg.", azDegrees, altDegrees);
+    m_MovingAxes += 2;
+    // TODO: command hardware
+    return IPS_BUSY;
+}
 ```
 
 ### Step 3: Create the CMakeLists.txt Entry
@@ -799,6 +842,78 @@ void MyPACDriver::TimerHit()
 }
 ```
 
+## Coordinated Dual-Axis Movement
+
+When a Polar Alignment Assistant needs to apply a correction in both azimuth and altitude at the same time, it sends a single `PAC_MANUAL_ADJUSTMENT` write with both elements non-zero. `processNumber()` detects this and calls `MoveBoth()` instead of the two individual methods.
+
+### How `processNumber()` dispatches movement
+
+```
+PAC_MANUAL_ADJUSTMENT written
+  ├─ MANUAL_AZ_STEP != 0 AND MANUAL_ALT_STEP != 0
+  │      → MoveBoth(azStep, altStep)
+  ├─ MANUAL_AZ_STEP != 0 only
+  │      → MoveAZ(azStep)
+  └─ MANUAL_ALT_STEP != 0 only
+         → MoveALT(altStep)
+```
+
+### Default behaviour (no override)
+
+If a driver does **not** override `MoveBoth`, the base-class implementation calls `MoveAZ()` and then `MoveALT()` in sequence. This is safe and correct for any driver that already implements single-axis movement.
+
+### Overriding MoveBoth for simultaneous motion
+
+Override `MoveBoth` when your hardware can move both axes in a single command:
+
+**Example — Avalon UPAS (GRBL multi-axis jog):**
+```cpp
+IPState AvalonUPAS::MoveBoth(double azDegrees, double altDegrees)
+{
+    const double mmAZ    = azDegrees  * GearRatioNP[GEAR_AZ].getValue();
+    const double mmALT   = altDegrees * GearRatioNP[GEAR_ALT].getValue();
+    const double feedRate = SpeedNP[0].getValue();
+
+    char cmd[DRIVER_LEN] = {0};
+    snprintf(cmd, DRIVER_LEN, "$J=G91G21X%.4fY%.4f F%.0f", mmAZ, mmALT, feedRate);
+
+    char res[DRIVER_LEN] = {0};
+    if (!sendCommand(cmd, res) || strncmp(res, "ok", 2) != 0)
+        return IPS_ALERT;
+
+    m_IsMoving = true;
+    return IPS_BUSY;
+}
+```
+
+**Example — MLAstro RPA (chained angle registers + `AAll:1`):**
+```cpp
+IPState MLAstroRPA::MoveBoth(double azDegrees, double altDegrees)
+{
+    int azD, azM, azS; bool azPos;
+    degreesToDMS(azDegrees,  azD, azM, azS, azPos);
+
+    int altD, altM, altS; bool altPos;
+    degreesToDMS(altDegrees, altD, altM, altS, altPos);
+
+    char cmd[DRIVER_LEN] = {0};
+    snprintf(cmd, DRIVER_LEN,
+             "AzED:%d,AzEM:%d,AzES:%d,AzDi:%d,"
+             "AlED:%d,AlEM:%d,AlES:%d,AlDi:%d,AAll:1",
+             azD, azM, azS, azPos ? 1 : 0,
+             altD, altM, altS, altPos ? 1 : 0);
+
+    char res[DRIVER_LEN] = {0};
+    if (!sendCommand(cmd, res) || strncmp(res, "ok", 2) != 0)
+        return IPS_ALERT;
+
+    m_IsMoving = true;
+    return IPS_BUSY;
+}
+```
+
+> **Note:** For the MLAstro RPA the `AAll:1` command causes the device to execute AZ first and then ALT internally. The driver does not need to sequence them — it only needs to detect completion via telemetry polling.
+
 ## Best Practices
 
 When implementing the PAC interface, follow these best practices:
@@ -806,9 +921,11 @@ When implementing the PAC interface, follow these best practices:
 - **Implement simulation mode** — check `isSimulation()` and provide simulated motion with realistic durations so clients can be tested without hardware.
 - **Set capabilities in the constructor** — call `SetCapability()` before `initProperties()` runs.
 - **Adjust speed range after `PACI::initProperties()`** — the default range is 1–10; modify `SpeedNP[0]` min/max/step to match your hardware.
+- **Override `MoveBoth` when your hardware has a native dual-axis command** — the default implementation (sequential `MoveAZ` + `MoveALT`) is safe, but a single combined command is faster and more accurate when supported.
 - **Track moving axes** — maintain an axis counter so `ManualAdjustmentNP` is only set to `IPS_OK` after *both* requested axes have finished.
 - **Guard GoHome against missing home** — check whether a home position has been stored before issuing the command and return `IPS_ALERT` with an informative message if not.
 - **Forward `saveConfigItems`** — call `PACI::saveConfigItems(fp)` to persist speed, reverse, home, sync, and backlash settings across sessions.
+- **Do not save device-side settings in `saveConfigItems`** — settings persisted on the device itself (e.g. in FRAM via a Save&Reboot command) should be read back from hardware via telemetry, not pushed from the INDI config file on reconnect.
 - **Handle abort gracefully** — stop all hardware motion immediately and reset `m_MovingAxes` to 0.
 - **Use 4-decimal-place precision** — degree values from PAA tools are typically ±0.001°.
 - **Document sign conventions** in your driver's log messages and user manual.
@@ -817,11 +934,11 @@ When implementing the PAC interface, follow these best practices:
 
 The following drivers in the INDI source tree implement the PAC interface and can serve as implementation references:
 
-| Driver | Source file | Capabilities |
-|--------|-------------|--------------|
-| PAC Simulator | `drivers/auxiliary/pac_simulator.cpp` | `PAC_HAS_SPEED \| PAC_CAN_REVERSE` |
-| Avalon UPAS | `drivers/auxiliary/avalon_upas.cpp` | `PAC_HAS_SPEED \| PAC_CAN_REVERSE \| PAC_HAS_POSITION` |
-| MLAstro RPA | `drivers/auxiliary/mlastro_rpa.cpp` | `PAC_HAS_SPEED \| PAC_CAN_REVERSE \| PAC_HAS_POSITION \| PAC_CAN_HOME \| PAC_HAS_BACKLASH \| PAC_CAN_SYNC` |
+| Driver | Source file | Capabilities | `MoveBoth` override |
+|--------|-------------|--------------|---------------------|
+| PAC Simulator | `drivers/auxiliary/pac_simulator.cpp` | `PAC_HAS_SPEED \| PAC_CAN_REVERSE` | No (uses default) |
+| Avalon UPAS | `drivers/auxiliary/avalon_upas.cpp` | `PAC_HAS_SPEED \| PAC_CAN_REVERSE \| PAC_HAS_POSITION` | Yes — single GRBL `$J=G91G21X…Y…` command |
+| MLAstro RPA | `drivers/auxiliary/mlastro_rpa.cpp` | `PAC_HAS_SPEED \| PAC_CAN_REVERSE \| PAC_HAS_POSITION \| PAC_CAN_HOME \| PAC_HAS_BACKLASH \| PAC_CAN_SYNC` | Yes — chained `AAll:1` command |
 
 ## Conclusion
 
