@@ -154,10 +154,16 @@ The `INDI::RotatorInterface` class includes the following important member varia
     A `PropertyNumber` for setting the backlash compensation steps.
 
 -   `INDI::PropertyNumber RotatorLimitsNP;`
-    A `PropertyNumber` for defining rotator limits.
+    A `PropertyNumber` labelled **"Safe Range (degrees)"** that defines a symmetric safety window around the last sync position. Set to `0` to disable limits entirely (no restriction). Set to any value between `1` and `360` to restrict motion to within ±(value/2) degrees of `m_RotatorOffset`. A value of `360` is also treated as unrestricted (the ±180° window covers the full circle).
+
+    **Safe range formula**: Given a sync offset *O* and a limit *L*, motion to target angle *T* is allowed when:
+    ```
+    min(|T − O|, 360 − |T − O|) ≤ L / 2
+    ```
+    This minimum-arc-distance formula correctly handles wrap-around angles (e.g., an offset near 0°/360°). When the limit is saved it will log the resulting safe window as `[O − L/2, O + L/2]`.
 
 -   `double m_RotatorOffset;`
-    An internal offset for rotator position.
+    The reference angle set by the last `SyncRotator()` call. It marks the centre of the safe window enforced by `RotatorLimitsNP`. Defaults to `0`.
 
 -   `uint32_t rotatorCapability;`
     Stores the bitmask of the rotator's capabilities.
